@@ -1,7 +1,7 @@
 /* Akhiro – German speaking partner. Voice: Gemini Live. Teacher: Gemini Flash. Data stays on this device. */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 /* =========================================================
    Small helpers
@@ -80,7 +80,7 @@ const DB = {
 const DEFAULT_SETTINGS = { apiKey: '', liveModel: 'gemini-3.8-live', textModel: 'gemini-flash-latest', activeProfileId: null };
 const DEFAULT_PROFILE = {
   name: '', nativeLang: 'English', city: '', level: 'unknown', goal: 'Alltag', interests: '',
-  persona: 'Akhiro', voice: 'Puck', correction: 'normal', turnMode: 'tap', bargeIn: false, dailyGoalMin: 8
+  persona: 'Akhiro', voice: 'Puck', correction: 'normal', turnMode: 'natural', pause: 'normal', echoGuard: true, dailyGoalMin: 8
 };
 const emptyData = () => ({
   sessions: [],
@@ -102,6 +102,7 @@ async function selectProfile(id) {
   if (!p) return;
   S.profile = { ...DEFAULT_PROFILE, ...p };
   if (S.profile.persona === 'Lena') { S.profile.persona = 'Akhiro'; if (S.profile.voice === 'Aoede') S.profile.voice = 'Puck'; }
+  if (!S.profile.v12) { S.profile.turnMode = 'natural'; S.profile.v12 = true; persistProfile(); }
   const d = await DB.get('p:' + id, null);
   const base = emptyData();
   S.data = d ? { ...base, ...d, memory: { ...base.memory, ...(d.memory || {}) } } : base;
@@ -169,6 +170,7 @@ function buildSystemInstruction() {
 THIS IS A SPOKEN CONVERSATION
 - Speak German. No lists, markdown or emojis. Talk like a person on the phone.
 - Keep your turns short: one to three sentences, so I speak more than you.
+- This is a continuous, natural conversation. I may interrupt you at any time; if I do, stop and respond to what I just said.
 - I am a learner and I pause to find words. Never finish my sentences for me. Wait.
 - Don't end every turn with a question. Mix reactions, little stories about your own (invented) life, opinions and questions, like a real friend.
 
@@ -228,10 +230,12 @@ registerProcessor('cap', Cap);`;
 
 const AudioIO = {
   ctx: null, stream: null, node: null, src: null, nextPlay: 0, sources: new Set(), partnerSec: 0, onFrame: null,
-  async start(onFrame) {
+  out: null, pc1: null, pc2: null, el: null, aec: false,
+  async start(onFrame, echoGuard) {
     this.onFrame = onFrame;
     this.ctx = new (window.AudioContext || window.webkitAudioContext)();
     await this.ctx.resume();
+    this.out = this.ctx.destination; this.aec = false;
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
     const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
     await this.ctx.audioWorklet.addModule(url);
@@ -241,13 +245,46 @@ const AudioIO = {
     this.src.connect(this.node); this.node.connect(mute); mute.connect(this.ctx.destination);
     this.node.port.onmessage = (e) => this.onFrame && this.onFrame(e.data.pcm, e.data.rms);
     this.nextPlay = this.ctx.currentTime; this.partnerSec = 0;
+    if (echoGuard && window.RTCPeerConnection) {
+      try { await this.setupLoopback(); } catch (e) { console.warn('Echo guard unavailable:', e.message); this.teardownLoopback(); this.out = this.ctx.destination; }
+    }
+  },
+  // Chrome only removes echo of audio that arrives over WebRTC. Routing the partner's voice through a
+  // local RTCPeerConnection pair into an <audio> element lets the echo canceller see it, so the mic
+  // can stay open while the partner talks and the learner can interrupt naturally.
+  async setupLoopback() {
+    const dest = this.ctx.createMediaStreamDestination();
+    const pc1 = new RTCPeerConnection(), pc2 = new RTCPeerConnection();
+    this.pc1 = pc1; this.pc2 = pc2;
+    pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate).catch(() => {});
+    pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate).catch(() => {});
+    const el = new Audio(); el.autoplay = true; this.el = el;
+    pc2.ontrack = (e) => { el.srcObject = (e.streams && e.streams[0]) || new MediaStream([e.track]); el.play().catch(() => {}); };
+    dest.stream.getAudioTracks().forEach((t) => pc1.addTrack(t, dest.stream));
+    const hiQ = (sdp) => sdp.replace(/a=fmtp:(\d+) ([^\r\n]*useinbandfec=1[^\r\n]*)/g, (m, pt, rest) => 'a=fmtp:' + pt + ' ' + rest + ';maxaveragebitrate=96000');
+    const offer = await pc1.createOffer(); await pc1.setLocalDescription(offer);
+    await pc2.setRemoteDescription({ type: 'offer', sdp: hiQ(offer.sdp) });
+    const answer = await pc2.createAnswer(); await pc2.setLocalDescription(answer);
+    await pc1.setRemoteDescription({ type: 'answer', sdp: hiQ(answer.sdp) });
+    await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error('loopback did not connect')), 4000);
+      const ok = () => ['connected', 'completed'].includes(pc1.iceConnectionState) || pc1.connectionState === 'connected';
+      const chk = () => { if (ok()) { clearTimeout(t); res(); } };
+      pc1.oniceconnectionstatechange = chk; pc1.onconnectionstatechange = chk; chk();
+    });
+    this.out = dest; this.aec = true;
+  },
+  teardownLoopback() {
+    try { if (this.el) { this.el.pause(); this.el.srcObject = null; } } catch (e) {}
+    try { this.pc1 && this.pc1.close(); this.pc2 && this.pc2.close(); } catch (e) {}
+    this.pc1 = this.pc2 = this.el = null; this.aec = false;
   },
   play(b64) {
     if (!this.ctx) return;
     const bin = atob(b64), n = bin.length >> 1; if (!n) return;
     const buf = this.ctx.createBuffer(1, n, 24000), ch = buf.getChannelData(0);
     for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v >= 0x8000) v -= 0x10000; ch[i] = v / 0x8000; }
-    const s = this.ctx.createBufferSource(); s.buffer = buf; s.connect(this.ctx.destination);
+    const s = this.ctx.createBufferSource(); s.buffer = buf; s.connect(this.out || this.ctx.destination);
     const at = Math.max(this.nextPlay, this.ctx.currentTime + 0.04);
     s.start(at); this.nextPlay = at + buf.duration; this.partnerSec += buf.duration;
     this.sources.add(s); s.onended = () => this.sources.delete(s);
@@ -259,6 +296,7 @@ const AudioIO = {
   isPlaying(tail = 0.3) { return !!this.ctx && this.ctx.currentTime < this.nextPlay + tail; },
   stop() {
     this.stopPlayback();
+    this.teardownLoopback();
     try { this.node && this.node.disconnect(); this.src && this.src.disconnect(); } catch (e) {}
     if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
     if (this.ctx) this.ctx.close().catch(() => {});
@@ -348,7 +386,7 @@ class GeminiLive {
     };
     s.realtimeInputConfig = this.o.turnMode === 'tap'
       ? { automaticActivityDetection: { disabled: true } }
-      : { automaticActivityDetection: { silenceDurationMs: 1200, prefixPaddingMs: 200, endOfSpeechSensitivity: 'END_SENSITIVITY_LOW' } };
+      : { automaticActivityDetection: { silenceDurationMs: this.o.pauseMs || 1000, prefixPaddingMs: 200, endOfSpeechSensitivity: 'END_SENSITIVITY_LOW' } };
     return s;
   }
   handleMsg(m) {
@@ -367,6 +405,7 @@ class GeminiLive {
   sendAudio(buf) { if (this.ready) this.send({ realtimeInput: { audio: { data: bytesToB64(new Uint8Array(buf)), mimeType: 'audio/pcm;rate=16000' } } }); }
   activityStart() { this.send({ realtimeInput: { activityStart: {} } }); }
   activityEnd() { this.send({ realtimeInput: { activityEnd: {} } }); }
+  streamPause() { this.send({ realtimeInput: { audioStreamEnd: true } }); }
   sendText(t) { this.send({ clientContent: { turns: [{ role: 'user', parts: [{ text: t }] }], turnComplete: true } }); }
   close() { this.byUs = true; try { this.ws && this.ws.close(); } catch (e) {} this.ws = null; this.ready = false; }
 }
@@ -403,7 +442,7 @@ function updateMainButton() {
     if (T.userTalking) { btn.textContent = 'Fertig – senden'; btn.classList.add('dark'); }
     else { btn.textContent = AudioIO.isPlaying(0) ? 'Unterbrechen & sprechen' : 'Tippen & sprechen'; btn.classList.remove('dark'); }
   } else {
-    btn.textContent = T.muted ? 'Mikro an' : 'Mikro aus'; btn.classList.toggle('dark', T.muted);
+    btn.textContent = T.muted ? 'Weiter' : 'Pause'; btn.classList.toggle('dark', T.muted);
   }
 }
 
@@ -425,13 +464,14 @@ function liveEvents(ev, data) {
       break;
     }
     case 'audio':
+      if (T.dropAudio) break;
       if (!AudioIO.isPlaying(0)) { T.tracker.endTurn(); }
       AudioIO.play(data);
       break;
     case 'userText': addLine('user', data); break;
-    case 'partnerText': addLine('partner', data); break;
-    case 'interrupted': AudioIO.stopPlayback(); break;
-    case 'turnComplete': closeLines(); break;
+    case 'partnerText': if (!T.dropAudio) addLine('partner', data); break;
+    case 'interrupted': AudioIO.stopPlayback(); T.dropAudio = false; closeLines(); break;
+    case 'turnComplete': closeLines(); T.dropAudio = false; break;
     case 'goAway': reconnect(true); break;
     case 'closed': {
       if (data.byUs || T.ending) return;
@@ -462,18 +502,33 @@ function reconnect(planned) {
 function newLive() {
   return new GeminiLive({
     apiKey: S.settings.apiKey, model: S.settings.liveModel || DEFAULT_SETTINGS.liveModel,
-    voice: S.profile.voice || 'Puck', system: buildSystemInstruction(), turnMode: S.profile.turnMode, on: liveEvents
+    voice: S.profile.voice || 'Puck', system: buildSystemInstruction(), turnMode: S.profile.turnMode,
+    pauseMs: { short: 700, normal: 1000, long: 1500 }[S.profile.pause] || 1000, on: liveEvents
   });
 }
 
 function onFrame(pcm, rms) {
   if (!T.active) return;
-  const playing = AudioIO.isPlaying();
-  const tap = S.profile.turnMode === 'tap';
-  const listening = tap ? T.userTalking : (!T.muted && (S.profile.bargeIn || !playing));
+  let listening = false, send = false;
+  if (S.profile.turnMode === 'tap') { listening = send = T.userTalking; }
+  else if (!T.muted) {
+    if (!AudioIO.isPlaying(0.25)) { listening = send = true; T.barge = 0; T.preroll = []; }
+    else {
+      // The partner is talking. Keep listening for the learner cutting in: sustained sound clearly above
+      // the leftover echo for 200 ms counts as an interruption.
+      const thr = Math.max(0.025, T.echoFloor * 3);
+      if (rms > thr) T.barge++; else { T.barge = 0; T.echoFloor = T.echoFloor * 0.9 + rms * 0.1; }
+      T.preroll.push(pcm); if (T.preroll.length > 8) T.preroll.shift();
+      if (T.barge >= 4) {
+        AudioIO.stopPlayback(); T.dropAudio = true; T.barge = 0; closeLines();
+        if (T.live && T.live.ready) T.preroll.forEach((p) => T.live.sendAudio(p));
+        T.preroll = []; listening = true;
+      }
+    }
+  }
   $('#halo').style.transform = 'scale(' + (0.82 + clamp(listening ? rms * 5 : 0, 0, 0.3)) + ')';
   T.tracker.frame(pcm, rms, listening);
-  if (T.live && T.live.ready && listening) T.live.sendAudio(pcm);
+  if (send && T.live && T.live.ready) T.live.sendAudio(pcm);
 }
 
 function onTick() {
@@ -485,9 +540,9 @@ function onTick() {
   $('#mouth').setAttribute('d', playing ? 'M44 74 Q60 94 76 74' : 'M44 76 Q60 88 76 76');
   if (playing) $('#halo').style.transform = 'scale(' + (0.9 + Math.random() * 0.1) + ')';
   if (T.live && T.live.ready) {
-    if (playing) setStatus(personaName() + ' spricht …');
-    else if (S.profile.turnMode === 'tap') setStatus(T.userTalking ? 'Ich höre zu … tippe „Fertig“' : 'Du bist dran');
-    else setStatus(T.muted ? 'Mikro ist aus' : 'Ich höre zu …');
+    if (S.profile.turnMode === 'tap') setStatus(playing ? personaName() + ' spricht …' : T.userTalking ? 'Ich höre zu … tippe „Fertig“' : 'Du bist dran');
+    else if (T.muted) setStatus('Pausiert');
+    else setStatus(playing ? personaName() + ' spricht … du kannst reinreden' : 'Ich höre zu …');
   }
   updateMainButton();
 }
@@ -495,14 +550,14 @@ function onTick() {
 async function startTalk() {
   if (!S.settings.apiKey) { toast('Bitte zuerst deinen Gemini-Schlüssel eintragen.'); showView('profile'); return; }
   if (T.active) return;
-  Object.assign(T, { active: true, transcript: [], userTalking: false, muted: false, wasPlaying: false, reconnects: 0, firstReady: true, ending: false, startedAt: 0, freshReconnect: false, topic: S.topic });
+  Object.assign(T, { active: true, transcript: [], userTalking: false, muted: false, wasPlaying: false, reconnects: 0, firstReady: true, ending: false, startedAt: 0, freshReconnect: false, topic: S.topic, barge: 0, echoFloor: 0.01, preroll: [], dropAudio: false });
   T.tracker = new SpeechTracker();
   renderTranscript();
   $('#talkTimer').textContent = '0:00';
-  $('#talkMode').textContent = S.profile.turnMode === 'tap' ? 'Tippen' : 'Freihändig';
+  $('#talkMode').textContent = S.profile.turnMode === 'tap' ? 'Tippen' : 'Natürlich';
   setStatus('Verbinde …');
   $('#talk').classList.remove('hidden');
-  try { await AudioIO.start(onFrame); }
+  try { await AudioIO.start(onFrame, S.profile.turnMode !== 'tap' && S.profile.echoGuard !== false); }
   catch (err) {
     T.active = false; $('#talk').classList.add('hidden');
     toast(err && err.name === 'NotAllowedError' ? 'Mikrofon blockiert – bitte im Browser erlauben.' : 'Audio-Fehler: ' + (err.message || err), 6000);
@@ -525,7 +580,7 @@ function mainButton() {
     }
   } else {
     T.muted = !T.muted;
-    if (T.muted) T.tracker.endTurn();
+    if (T.muted) { T.tracker.endTurn(); T.live.streamPause(); }
   }
   updateMainButton();
 }
@@ -846,14 +901,13 @@ function renderHome() {
     <div><b>${esc(S.data.level || '?')}</b><span>Niveau (KI)</span></div><div><b>${S.data.memory.vocab.length}</b><span>Wörter</span></div></div></div>
     <p class="tiny muted" style="margin-top:10px">Der Ring zählt nur deine eigene Sprechzeit.</p></div>`;
   h += `<h3 style="margin-top:18px">Worüber reden wir?</h3><div class="chips" style="margin:10px 0 14px">${TOPICS.map((t) => `<button class="chip ${t === S.topic ? 'on' : ''}" data-topic="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
-  h += `<div class="seg" style="margin-bottom:14px"><button data-mode="tap" class="${p.turnMode === 'tap' ? 'on' : ''}">Tippen zum Sprechen</button><button data-mode="handsfree" class="${p.turnMode !== 'tap' ? 'on' : ''}">Freihändig</button></div>`;
+  h += `<p class="small muted" style="margin:0 0 12px">${p.turnMode === 'tap' ? 'Modus: Tippen zum Sprechen (im Profil änderbar).' : 'Einfach losreden – ' + esc(name) + ' antwortet von selbst, und du kannst jederzeit reinreden.'}</p>`;
   h += `<button class="btn block big" id="startBtn">${MIC.replace('<svg', '<svg width="24" height="24"')} Mit ${esc(name)} reden</button>`;
   if (due.length) h += `<div class="card tint"><h3>Heute wiederholen</h3><p class="small muted">${esc(name)} baut diese Wörter ins Gespräch ein. Versuch sie zu benutzen!</p><div class="chips">${due.map((v) => `<span class="chip" data-tip="${esc(v.meaning)}">${esc(v.word)}</span>`).join('')}</div></div>`;
   if (last) h += `<div class="card"><div class="row spread"><h3>Letztes Gespräch</h3><span class="tiny muted">${fmtDate(last.date)}</span></div><p class="small">${esc(last.feedback.summary || '')}</p>${last.feedback.focusNext ? `<p class="small"><b>Nächstes Mal:</b> ${esc(last.feedback.focusNext)}</p>` : ''}</div>`;
   $('#view-home').innerHTML = h;
   $('#startBtn').onclick = startTalk;
   document.querySelectorAll('#view-home [data-topic]').forEach((b) => (b.onclick = () => { S.topic = b.dataset.topic; renderHome(); }));
-  document.querySelectorAll('#view-home [data-mode]').forEach((b) => (b.onclick = () => { S.profile.turnMode = b.dataset.mode; persistProfile(); renderHome(); }));
 }
 
 function statTile(label, value, tag, sub) {
@@ -947,9 +1001,10 @@ function renderProfile() {
     <label class="f" for="pf-persona">Name</label><input type="text" id="pf-persona" value="${esc(p.persona)}">
     <label class="f" for="pf-voice">Stimme</label><select id="pf-voice">${voices.map(([v, l]) => `<option value="${v}" ${p.voice === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
     <label class="f">Korrekturen</label>${seg('correction', [['chill', 'Locker'], ['normal', 'Normal'], ['strict', 'Streng']])}
-    <label class="f">Sprechen</label>${seg('turnMode', [['tap', 'Tippen'], ['handsfree', 'Freihändig']])}<div class="hint">Tippen: du entscheidest, wann du fertig bist – gut zum Nachdenken.</div>
+    <label class="f">Gesprächsart</label>${seg('turnMode', [['natural', 'Natürlich'], ['tap', 'Mit Tippen']])}<div class="hint">Natürlich: einfach reden, ${esc(p.persona || 'Akhiro')} antwortet von selbst und du kannst jederzeit unterbrechen. Mit Tippen: du entscheidest, wann du fertig bist.</div>
+    <label class="f">Wie lange ${esc(p.persona || 'Akhiro')} wartet, bevor er antwortet</label>${seg('pause', [['short', 'Kurz'], ['normal', 'Normal'], ['long', 'Lang']])}<div class="hint">„Lang“ hilft, wenn du beim Sprechen oft nachdenkst.</div>
     <label class="f">Tagesziel (deine Sprechminuten)</label>${seg('dailyGoalMin', [[5, '5'], [8, '8'], [12, '12'], [20, '20']])}
-    <div class="toggle"><div><b class="small">Ich trage Kopfhörer</b><div class="hint">Dann darfst du ${esc(p.persona || 'Akhiro')} freihändig unterbrechen.</div></div><input type="checkbox" id="pf-barge" ${p.bargeIn ? 'checked' : ''}></div></div>`;
+    <div class="toggle"><div><b class="small">Echo-Schutz (Lautsprecher)</b><div class="hint">Damit ${esc(p.persona || 'Akhiro')} sich nicht selbst hört. Falls er zu leise oder abgehackt klingt, ausschalten.</div></div><input type="checkbox" id="pf-echo" ${p.echoGuard !== false ? 'checked' : ''}></div></div>`;
   h += `<button class="btn block" id="pfSave">Speichern</button>`;
   h += `<div class="card" style="margin-top:22px"><h3>Gemini-Schlüssel</h3><input type="password" id="st-key" value="${esc(st.apiKey)}" placeholder="AIza…" autocomplete="off"><div class="hint">Nur auf diesem Gerät gespeichert, für alle Profile. Kostenlos: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a></div>
     <details style="margin-top:10px"><summary class="small">Erweitert: Modelle</summary><label class="f" for="st-live">Sprachmodell</label><input type="text" id="st-live" value="${esc(st.liveModel)}"><label class="f" for="st-text">Auswertungsmodell</label><input type="text" id="st-text" value="${esc(st.textModel)}"><div class="hint">Nur ändern, wenn Google die Namen ändert.</div></details>
@@ -962,7 +1017,7 @@ function renderProfile() {
     sg.querySelectorAll('button').forEach((x) => x.classList.remove('on')); b.classList.add('on');
   })));
   $('#pfSave').onclick = () => {
-    Object.assign(S.profile, { name: $('#pf-name').value.trim(), nativeLang: $('#pf-native').value.trim() || 'English', city: $('#pf-city').value.trim(), level: $('#pf-level').value, goal: $('#pf-goal').value, interests: $('#pf-int').value.trim(), persona: $('#pf-persona').value.trim() || 'Akhiro', voice: $('#pf-voice').value, bargeIn: $('#pf-barge').checked });
+    Object.assign(S.profile, { name: $('#pf-name').value.trim(), nativeLang: $('#pf-native').value.trim() || 'English', city: $('#pf-city').value.trim(), level: $('#pf-level').value, goal: $('#pf-goal').value, interests: $('#pf-int').value.trim(), persona: $('#pf-persona').value.trim() || 'Akhiro', voice: $('#pf-voice').value, echoGuard: $('#pf-echo').checked });
     document.querySelectorAll('#view-profile [data-seg]').forEach((sg) => { const on = sg.querySelector('.on'); if (on) { const k = sg.dataset.seg; S.profile[k] = k === 'dailyGoalMin' ? Number(on.dataset.v) : on.dataset.v; } });
     persistProfile(); toast('Gespeichert ✓'); renderAll();
   };
