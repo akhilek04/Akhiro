@@ -1,7 +1,7 @@
 /* Akhiro – German speaking partner. Voice: Gemini Live. Teacher: Gemini Flash. Data stays on this device. */
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.4.0';
 
 /* =========================================================
    Small helpers
@@ -816,17 +816,17 @@ function barChart(data, { goal = null, unit = '', fmt = (v) => fmtNum(v, 1) } = 
   const y = (v) => Tp + (H - Tp - B) * (1 - v / max);
   const ticks = niceTicks(max, 3);
   let g = ticks.map((t) => `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="axis" x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${fmtNum(t)}</text>`).join('');
-  if (goal) g += `<line x1="${L}" x2="${W - R}" y1="${y(goal)}" y2="${y(goal)}" stroke="#F28C28" stroke-width="2" stroke-dasharray="5 4"/><text class="axis" x="${W - R}" y="${y(goal) - 5}" text-anchor="end" fill="#B9600C">Ziel</text>`;
+  if (goal) g += `<line x1="${L}" x2="${W - R}" y1="${y(goal)}" y2="${y(goal)}" stroke="#BD131E" stroke-width="2" stroke-dasharray="5 4"/><text class="axis" x="${L + 4}" y="${y(goal) - 5}" text-anchor="start" fill="#BD131E">Ziel</text>`;
   const bars = data.map((d, i) => {
     const x = L + i * step + (step - bw) / 2, top = y(d.value), h = Math.max(0, H - B - top), r = Math.min(4, h, bw / 2);
     const path = h > 0 ? `M${x} ${H - B}V${top + r}Q${x} ${top} ${x + r} ${top}H${x + bw - r}Q${x + bw} ${top} ${x + bw} ${top + r}V${H - B}Z` : '';
     const tip = esc(d.tip || (d.label + ': ' + fmt(d.value) + unit));
-    return `${path ? `<path d="${path}" fill="${d.hi ? '#0B1E33' : '#23AE85'}"/>` : ''}<rect class="hit" x="${L + i * step}" y="${Tp}" width="${step}" height="${H - Tp - B}" data-tip="${tip}"/>` +
+    return `${path ? `<path d="${path}" fill="${d.hi ? '#13866F' : '#33CDAF'}"/>` : ''}<rect class="hit" x="${L + i * step}" y="${Tp}" width="${step}" height="${H - Tp - B}" data-tip="${tip}"/>` +
       (d.showLabel ? `<text class="axis" x="${x + bw / 2}" y="${H - 8}" text-anchor="middle">${esc(d.label)}</text>` : '');
   }).join('');
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img">${g}<line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" stroke="#D9D4DF" stroke-width="1"/>${bars}</svg>`;
 }
-function lineChart(points, { unit = '', fmt = (v) => fmtNum(v, 1), lowerIsBetter = false } = {}) {
+function lineChart(points, { unit = '', fmt = (v) => fmtNum(v, 1), lowerIsBetter = false, color = '#13866F' } = {}) {
   const W = 340, H = 170, L = 28, R = 30, Tp = 16, B = 22;
   const vals = points.map((p) => p.value);
   let lo = Math.min(...vals), hi = Math.max(...vals);
@@ -838,9 +838,9 @@ function lineChart(points, { unit = '', fmt = (v) => fmtNum(v, 1), lowerIsBetter
   const g = ticks.map((t) => `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="axis" x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${fmtNum(t)}</text>`).join('');
   const d = points.map((p, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p.value).toFixed(1)).join('');
   const last = points[points.length - 1];
-  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.value)}" r="4.5" fill="#0B1E33" stroke="#fff" stroke-width="2"/><rect class="hit" x="${x(i) - 14}" y="${Tp}" width="28" height="${H - Tp - B}" data-tip="${esc(p.label + ': ' + fmt(p.value) + unit)}"/>`).join('');
+  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.value)}" r="4.5" fill="${color}" stroke="#fff" stroke-width="2"/><rect class="hit" x="${x(i) - 14}" y="${Tp}" width="28" height="${H - Tp - B}" data-tip="${esc(p.label + ': ' + fmt(p.value) + unit)}"/>`).join('');
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img">${g}<line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" stroke="#D9D4DF" stroke-width="1"/>` +
-    `<path d="${d}" fill="none" stroke="#0B1E33" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>${dots}` +
+    `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>${dots}` +
     `<text class="val" x="${x(points.length - 1) + 8}" y="${y(last.value) + 4}">${fmt(last.value)}</text>` +
     `<text class="axis" x="${L}" y="${H - 6}">${esc(points[0].label)}</text><text class="axis" x="${W - R}" y="${H - 6}" text-anchor="end">${esc(last.label)}</text></svg>` +
     (lowerIsBetter ? '<div class="tiny muted">Niedriger ist besser.</div>' : '');
@@ -853,8 +853,8 @@ function niceTicks(max, n) {
 }
 function ringSvg(frac) {
   const r = 46, c = 2 * Math.PI * r, f = clamp(frac, 0, 1);
-  return `<svg viewBox="0 0 112 112"><circle cx="56" cy="56" r="${r}" fill="none" stroke="#E6F6F0" stroke-width="14"/>` +
-    (f > 0.005 ? `<circle cx="56" cy="56" r="${r}" fill="none" stroke="${f >= 1 ? '#0B1E33' : '#23AE85'}" stroke-width="14" stroke-linecap="round" stroke-dasharray="${(c * f).toFixed(1)} ${c.toFixed(1)}"/>` : '') + '</svg>';
+  return `<svg viewBox="0 0 112 112"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#33CDAF"/><stop offset="1" stop-color="#7DDB5D"/></linearGradient></defs><circle cx="56" cy="56" r="${r}" fill="none" stroke="#E7F8F1" stroke-width="14"/>` +
+    (f > 0.005 ? `<circle cx="56" cy="56" r="${r}" fill="none" stroke="url(#ringGrad)" stroke-width="14" stroke-linecap="round" stroke-dasharray="${(c * f).toFixed(1)} ${c.toFixed(1)}"/>` : '') + '</svg>';
 }
 const FLAME = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c1 3.5 5 5.5 5 11a5 5 0 0 1-10 0c0-2.4 1-4 2.3-5.2.2 1.6 1 2.7 2.2 3.2C11 8.5 11 5 12 2z"/></svg>';
 const MIC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
@@ -895,7 +895,7 @@ function renderHome() {
   const name = p.persona || 'Akhiro';
   let h = '';
   if (!S.settings.apiKey) h += `<div class="card accent"><h3>Noch ein Schritt</h3><p class="small">${esc(name)} braucht deinen kostenlosen Gemini-Schlüssel. Hol ihn auf <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> und füg ihn unter Profil ein.</p><button class="btn small dark" onclick="showView('profile')">Zum Profil</button></div>`;
-  h += `<h1>Hallo${p.name ? ' ' + esc(p.name) : ''}!</h1><p class="muted">Bereit für ein Gespräch mit ${esc(name)}?</p>`;
+  h += `<div class="hello"><span class="brand-logo" style="width:58px" aria-hidden="true"></span><h1>Hallo${p.name ? ' ' + esc(p.name) : ''}!</h1></div><p class="muted">Bereit für ein Gespräch mit ${esc(name)}?</p>`;
   h += `<div class="card"><div class="hero"><div class="ring">${ringSvg(today / goalSec)}<div class="lbl"><div><b>${fmtMin(today)}</b><span>von ${p.dailyGoalMin || 8} Min</span></div></div></div>
     <div class="mini-stats"><div><b>${streak()}</b><span>Tage in Folge</span></div><div><b>${fmtMin(week)}</b><span>Min diese Woche</span></div>
     <div><b>${esc(S.data.level || '?')}</b><span>Niveau (KI)</span></div><div><b>${S.data.memory.vocab.length}</b><span>Wörter</span></div></div></div>
@@ -930,7 +930,7 @@ function renderProgress() {
   const days = lastDays(14).map((d, i, a) => ({ label: d.date.toLocaleDateString('de-DE', { day: 'numeric', month: 'numeric' }), value: d.sec / 60, hi: i === a.length - 1, showLabel: i % 3 === 1 || i === a.length - 1, tip: d.date.toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short' }) + ': ' + fmtMin(d.sec) + ' min' }));
   h += `<div class="card"><h3>Deine Sprechzeit, letzte 14 Tage</h3><p class="tiny muted">Minuten pro Tag, in denen du gesprochen hast</p>${barChart(days, { goal: S.profile.dailyGoalMin || 8, unit: ' min' })}</div>`;
   if (fluent.length >= 2) h += `<div class="card"><h3>Sprechtempo</h3><p class="tiny muted">Wörter pro Minute deiner Sprechzeit · <span class="tag approx">Ungefähr</span></p>${lineChart(fluent.map((s) => ({ label: fmtDate(s.date), value: s.metrics.wpm })), { unit: ' W/Min', fmt: (v) => fmtNum(v) })}</div>`;
-  if (graded.length >= 2) h += `<div class="card"><h3>Fehler pro 100 Wörter</h3><p class="tiny muted"><span class="tag ai">KI-Schätzung</span></p>${lineChart(graded.map((s) => ({ label: fmtDate(s.date), value: s.metrics.errorsPer100 })), { lowerIsBetter: true })}</div>`;
+  if (graded.length >= 2) h += `<div class="card"><h3>Fehler pro 100 Wörter</h3><p class="tiny muted"><span class="tag ai">KI-Schätzung</span></p>${lineChart(graded.map((s) => ({ label: fmtDate(s.date), value: s.metrics.errorsPer100 })), { lowerIsBetter: true, color: '#EA1C28' })}</div>`;
   h += `<h2 style="margin-top:20px">Die letzten 7 Tage</h2><p class="small muted">Durchschnitt aller Gespräche dieser Woche.</p>`;
   h += `<div class="statgrid" style="margin-top:10px">
     ${statTile('Wörter pro Minute', fmtNum(pick('wpm')), 'approx', 'Tempo')}
@@ -1011,7 +1011,7 @@ function renderProfile() {
     <button class="btn small dark" id="stSave" style="margin-top:12px">Schlüssel speichern</button></div>`;
   h += `<div class="card"><h3>Daten</h3><p class="small muted">Alles liegt nur auf diesem Handy. Mach ab und zu ein Backup.</p><div class="row wrap"><button class="btn small ghost" id="exportBtn">Backup exportieren</button><button class="btn small ghost" id="importBtn">Backup laden</button><input type="file" id="importFile" accept="application/json" class="hidden"></div>
     <div class="row wrap" style="margin-top:12px"><button class="btn small danger" id="delProfile">Profil löschen</button></div></div>
-    <p class="tiny muted center">Akhiro v${APP_VERSION} · Stimme: Google Gemini Live</p>`;
+    <span class="brand-logo" aria-hidden="true" style="width:64px;margin:18px auto 6px"></span><p class="tiny muted center">Akhiro v${APP_VERSION} · Stimme: Google Gemini Live</p>`;
   $('#view-profile').innerHTML = h;
   document.querySelectorAll('#view-profile [data-seg]').forEach((sg) => sg.querySelectorAll('button').forEach((b) => (b.onclick = () => {
     sg.querySelectorAll('button').forEach((x) => x.classList.remove('on')); b.classList.add('on');
@@ -1081,7 +1081,7 @@ function openPeople(forceCreate) {
   $('#peopleClose').classList.toggle('hidden', !S.profile);
   if (forceCreate || !S.profiles.length) { renderCreate(); return; }
   $('#peopleTitle').textContent = 'Wer übt heute?';
-  $('#peopleBody').innerHTML = `<div class="stack">${S.profiles.map((p) => `<button class="card row" style="width:100%;text-align:left;cursor:pointer;margin:0" data-pid="${p.id}"><span class="avatar" style="width:44px;height:44px;font-size:22px">${esc((p.name || '?').slice(0, 1).toUpperCase())}</span><div><h3 style="margin:0">${esc(p.name || 'Ohne Namen')}</h3><span class="small muted">${esc(p.goal || '')}</span></div></button>`).join('')}
+  $('#peopleBody').innerHTML = `<span class="brand-logo" role="img" aria-label="Akhiro" style="width:120px;margin:6px auto 18px"></span><div class="stack">${S.profiles.map((p) => `<button class="card row" style="width:100%;text-align:left;cursor:pointer;margin:0" data-pid="${p.id}"><span class="avatar" style="width:44px;height:44px;font-size:22px">${esc((p.name || '?').slice(0, 1).toUpperCase())}</span><div><h3 style="margin:0">${esc(p.name || 'Ohne Namen')}</h3><span class="small muted">${esc(p.goal || '')}</span></div></button>`).join('')}
     <button class="btn block ghost" id="newProfile">+ Neues Profil</button></div>`;
   document.querySelectorAll('#peopleBody [data-pid]').forEach((b) => (b.onclick = async () => { ov.classList.add('hidden'); await selectProfile(b.dataset.pid); showView('home'); }));
   $('#newProfile').onclick = () => renderCreate();
@@ -1090,7 +1090,7 @@ window.openPeople = openPeople;
 
 function renderCreate() {
   $('#peopleTitle').textContent = S.profiles.length ? 'Neues Profil' : 'Willkommen!';
-  $('#peopleBody').innerHTML = `<p class="muted">${S.profiles.length ? 'Ein Profil pro Person oder pro Ziel.' : 'Akhiro ist dein Freund zum Deutschsprechen – und dein Lehrer. Erzähl ihm kurz von dir.'}</p>
+  $('#peopleBody').innerHTML = `<span class="brand-logo" role="img" aria-label="Akhiro" style="width:150px;margin:6px auto 18px"></span><p class="muted">${S.profiles.length ? 'Ein Profil pro Person oder pro Ziel.' : 'Akhiro ist dein Freund zum Deutschsprechen – und dein Lehrer. Erzähl ihm kurz von dir.'}</p>
     <label class="f" for="np-name">Dein Name</label><input type="text" id="np-name" placeholder="z. B. Akhil">
     <label class="f" for="np-native">Muttersprache</label><input type="text" id="np-native" value="English">
     <label class="f" for="np-city">Stadt / Region</label><input type="text" id="np-city" placeholder="z. B. Berlin">
