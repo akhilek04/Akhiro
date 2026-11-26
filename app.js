@@ -1,7 +1,7 @@
 /* Akhiro – German speaking partner. Voice: Gemini Live. Teacher: Gemini Flash. Data stays on this device. */
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 /* =========================================================
    Small helpers
@@ -80,7 +80,7 @@ const DB = {
 const DEFAULT_SETTINGS = { apiKey: '', liveModel: 'gemini-3.8-live', textModel: 'gemini-flash-latest', activeProfileId: null };
 const DEFAULT_PROFILE = {
   name: '', nativeLang: 'English', city: '', level: 'unknown', goal: 'Alltag', interests: '',
-  persona: 'Akhiro', voice: 'Puck', correction: 'normal', turnMode: 'natural', pause: 'normal', echoGuard: true, dailyGoalMin: 8
+  persona: 'Akhiro', voice: 'Puck', correction: 'normal', turnMode: 'natural', pause: 'normal', bargeIn: false, echoGuard: true, dailyGoalMin: 8
 };
 const emptyData = () => ({
   sessions: [],
@@ -103,6 +103,7 @@ async function selectProfile(id) {
   S.profile = { ...DEFAULT_PROFILE, ...p };
   if (S.profile.persona === 'Lena') { S.profile.persona = 'Akhiro'; if (S.profile.voice === 'Aoede') S.profile.voice = 'Puck'; }
   if (!S.profile.v12) { S.profile.turnMode = 'natural'; S.profile.v12 = true; persistProfile(); }
+  if (!S.profile.v15) { S.profile.bargeIn = false; S.profile.v15 = true; persistProfile(); }
   const d = await DB.get('p:' + id, null);
   const base = emptyData();
   S.data = d ? { ...base, ...d, memory: { ...base.memory, ...(d.memory || {}) } } : base;
@@ -170,7 +171,7 @@ function buildSystemInstruction() {
 THIS IS A SPOKEN CONVERSATION
 - Speak German. No lists, markdown or emojis. Talk like a person on the phone.
 - Keep your turns short: one to three sentences, so I speak more than you.
-- This is a continuous, natural conversation. I may interrupt you at any time; if I do, stop and respond to what I just said.
+- This is a continuous, natural conversation. Always finish your sentence. If I interrupt you, stop and respond to what I just said.
 - I am a learner and I pause to find words. Never finish my sentences for me. Wait.
 - Don't end every turn with a question. Mix reactions, little stories about your own (invented) life, opinions and questions, like a real friend.
 
@@ -470,8 +471,8 @@ function liveEvents(ev, data) {
       break;
     case 'userText': addLine('user', data); break;
     case 'partnerText': if (!T.dropAudio) addLine('partner', data); break;
-    case 'interrupted': AudioIO.stopPlayback(); T.dropAudio = false; closeLines(); break;
-    case 'turnComplete': closeLines(); T.dropAudio = false; break;
+    case 'interrupted': AudioIO.stopPlayback(); T.dropAudio = false; clearTimeout(T.dropTimer); closeLines(); break;
+    case 'turnComplete': closeLines(); T.dropAudio = false; clearTimeout(T.dropTimer); break;
     case 'goAway': reconnect(true); break;
     case 'closed': {
       if (data.byUs || T.ending) return;
@@ -512,15 +513,25 @@ function onFrame(pcm, rms) {
   let listening = false, send = false;
   if (S.profile.turnMode === 'tap') { listening = send = T.userTalking; }
   else if (!T.muted) {
-    if (!AudioIO.isPlaying(0.25)) { listening = send = true; T.barge = 0; T.preroll = []; }
-    else {
-      // The partner is talking. Keep listening for the learner cutting in: sustained sound clearly above
-      // the leftover echo for 200 ms counts as an interruption.
-      const thr = Math.max(0.025, T.echoFloor * 3);
-      if (rms > thr) T.barge++; else { T.barge = 0; T.echoFloor = T.echoFloor * 0.9 + rms * 0.1; }
-      T.preroll.push(pcm); if (T.preroll.length > 8) T.preroll.shift();
-      if (T.barge >= 4) {
+    if (!AudioIO.isPlaying(0.4)) { listening = send = true; T.barge = 0; T.preroll = []; T.replyClock = null; }
+    else if (S.profile.bargeIn) {
+      // The partner is talking and interruptions are allowed (best with headphones).
+      // The echo level is learned from every frame of the partner's speech, the first 0.7 s of each reply
+      // is only used for learning, and only loud sound for 0.4 s in a row counts as the learner cutting in.
+      T.clock += 0.05;
+      if (T.replyClock == null) { T.replyClock = T.clock; T.echoPeak = 0; }
+      T.preroll.push(pcm); if (T.preroll.length > 10) T.preroll.shift();
+      if (T.clock - T.replyClock <= 0.7) {
+        // Learning phase: whatever the mic hears now is treated as echo of the partner's voice.
+        T.echoAvg = T.echoAvg * 0.9 + rms * 0.1; T.echoPeak = Math.max(T.echoPeak, rms); T.barge = 0;
+      } else {
+        const thr = Math.max(0.05, T.echoAvg * 4, T.echoPeak * 1.5);
+        if (rms > thr) T.barge++;
+        else { T.barge = 0; T.echoAvg = T.echoAvg * 0.97 + rms * 0.03; T.echoPeak = Math.max(T.echoPeak * 0.995, rms); }
+      }
+      if (T.barge >= 8) {
         AudioIO.stopPlayback(); T.dropAudio = true; T.barge = 0; closeLines();
+        clearTimeout(T.dropTimer); T.dropTimer = setTimeout(() => { T.dropAudio = false; }, 6000);
         if (T.live && T.live.ready) T.preroll.forEach((p) => T.live.sendAudio(p));
         T.preroll = []; listening = true;
       }
@@ -542,7 +553,7 @@ function onTick() {
   if (T.live && T.live.ready) {
     if (S.profile.turnMode === 'tap') setStatus(playing ? personaName() + ' spricht …' : T.userTalking ? 'Ich höre zu … tippe „Fertig“' : 'Du bist dran');
     else if (T.muted) setStatus('Pausiert');
-    else setStatus(playing ? personaName() + ' spricht … du kannst reinreden' : 'Ich höre zu …');
+    else setStatus(playing ? personaName() + (S.profile.bargeIn ? ' spricht … du kannst reinreden' : ' spricht …') : 'Ich höre zu …');
   }
   updateMainButton();
 }
@@ -550,14 +561,14 @@ function onTick() {
 async function startTalk() {
   if (!S.settings.apiKey) { toast('Bitte zuerst deinen Gemini-Schlüssel eintragen.'); showView('profile'); return; }
   if (T.active) return;
-  Object.assign(T, { active: true, transcript: [], userTalking: false, muted: false, wasPlaying: false, reconnects: 0, firstReady: true, ending: false, startedAt: 0, freshReconnect: false, topic: S.topic, barge: 0, echoFloor: 0.01, preroll: [], dropAudio: false });
+  Object.assign(T, { active: true, transcript: [], userTalking: false, muted: false, wasPlaying: false, reconnects: 0, firstReady: true, ending: false, startedAt: 0, freshReconnect: false, topic: S.topic, barge: 0, echoAvg: 0.02, echoPeak: 0, clock: 0, replyClock: null, preroll: [], dropAudio: false });
   T.tracker = new SpeechTracker();
   renderTranscript();
   $('#talkTimer').textContent = '0:00';
   $('#talkMode').textContent = S.profile.turnMode === 'tap' ? 'Tippen' : 'Natürlich';
   setStatus('Verbinde …');
   $('#talk').classList.remove('hidden');
-  try { await AudioIO.start(onFrame, S.profile.turnMode !== 'tap' && S.profile.echoGuard !== false); }
+  try { await AudioIO.start(onFrame, S.profile.turnMode !== 'tap' && S.profile.bargeIn && S.profile.echoGuard !== false); }
   catch (err) {
     T.active = false; $('#talk').classList.add('hidden');
     toast(err && err.name === 'NotAllowedError' ? 'Mikrofon blockiert – bitte im Browser erlauben.' : 'Audio-Fehler: ' + (err.message || err), 6000);
@@ -901,7 +912,7 @@ function renderHome() {
     <div><b>${esc(S.data.level || '?')}</b><span>Niveau (KI)</span></div><div><b>${S.data.memory.vocab.length}</b><span>Wörter</span></div></div></div>
     <p class="tiny muted" style="margin-top:10px">Der Ring zählt nur deine eigene Sprechzeit.</p></div>`;
   h += `<h3 style="margin-top:18px">Worüber reden wir?</h3><div class="chips" style="margin:10px 0 14px">${TOPICS.map((t) => `<button class="chip ${t === S.topic ? 'on' : ''}" data-topic="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
-  h += `<p class="small muted" style="margin:0 0 12px">${p.turnMode === 'tap' ? 'Modus: Tippen zum Sprechen (im Profil änderbar).' : 'Einfach losreden – ' + esc(name) + ' antwortet von selbst, und du kannst jederzeit reinreden.'}</p>`;
+  h += `<p class="small muted" style="margin:0 0 12px">${p.turnMode === 'tap' ? 'Modus: Tippen zum Sprechen (im Profil änderbar).' : 'Einfach losreden – ' + esc(name) + ' antwortet von selbst.' + (p.bargeIn ? ' Du kannst ihn jederzeit unterbrechen.' : '')}</p>`;
   h += `<button class="btn block big" id="startBtn">${MIC.replace('<svg', '<svg width="24" height="24"')} Mit ${esc(name)} reden</button>`;
   if (due.length) h += `<div class="card tint"><h3>Heute wiederholen</h3><p class="small muted">${esc(name)} baut diese Wörter ins Gespräch ein. Versuch sie zu benutzen!</p><div class="chips">${due.map((v) => `<span class="chip" data-tip="${esc(v.meaning)}">${esc(v.word)}</span>`).join('')}</div></div>`;
   if (last) h += `<div class="card"><div class="row spread"><h3>Letztes Gespräch</h3><span class="tiny muted">${fmtDate(last.date)}</span></div><p class="small">${esc(last.feedback.summary || '')}</p>${last.feedback.focusNext ? `<p class="small"><b>Nächstes Mal:</b> ${esc(last.feedback.focusNext)}</p>` : ''}</div>`;
@@ -1004,7 +1015,8 @@ function renderProfile() {
     <label class="f">Gesprächsart</label>${seg('turnMode', [['natural', 'Natürlich'], ['tap', 'Mit Tippen']])}<div class="hint">Natürlich: einfach reden, ${esc(p.persona || 'Akhiro')} antwortet von selbst und du kannst jederzeit unterbrechen. Mit Tippen: du entscheidest, wann du fertig bist.</div>
     <label class="f">Wie lange ${esc(p.persona || 'Akhiro')} wartet, bevor er antwortet</label>${seg('pause', [['short', 'Kurz'], ['normal', 'Normal'], ['long', 'Lang']])}<div class="hint">„Lang“ hilft, wenn du beim Sprechen oft nachdenkst.</div>
     <label class="f">Tagesziel (deine Sprechminuten)</label>${seg('dailyGoalMin', [[5, '5'], [8, '8'], [12, '12'], [20, '20']])}
-    <div class="toggle"><div><b class="small">Echo-Schutz (Lautsprecher)</b><div class="hint">Damit ${esc(p.persona || 'Akhiro')} sich nicht selbst hört. Falls er zu leise oder abgehackt klingt, ausschalten.</div></div><input type="checkbox" id="pf-echo" ${p.echoGuard !== false ? 'checked' : ''}></div></div>`;
+    <div class="toggle"><div><b class="small">Unterbrechen erlauben</b><div class="hint">Am besten mit Kopfhörern. Über den Lautsprecher kann ${esc(p.persona || 'Akhiro')} sonst seine eigene Stimme hören und mitten im Satz abbrechen.</div></div><input type="checkbox" id="pf-barge" ${p.bargeIn ? 'checked' : ''}></div>
+    <div class="toggle"><div><b class="small">Echo-Schutz</b><div class="hint">Nur wenn „Unterbrechen erlauben“ an ist. Falls ${esc(p.persona || 'Akhiro')} dann leise oder abgehackt klingt, ausschalten.</div></div><input type="checkbox" id="pf-echo" ${p.echoGuard !== false ? 'checked' : ''}></div></div>`;
   h += `<button class="btn block" id="pfSave">Speichern</button>`;
   h += `<div class="card" style="margin-top:22px"><h3>Gemini-Schlüssel</h3><input type="password" id="st-key" value="${esc(st.apiKey)}" placeholder="AIza…" autocomplete="off"><div class="hint">Nur auf diesem Gerät gespeichert, für alle Profile. Kostenlos: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a></div>
     <details style="margin-top:10px"><summary class="small">Erweitert: Modelle</summary><label class="f" for="st-live">Sprachmodell</label><input type="text" id="st-live" value="${esc(st.liveModel)}"><label class="f" for="st-text">Auswertungsmodell</label><input type="text" id="st-text" value="${esc(st.textModel)}"><div class="hint">Nur ändern, wenn Google die Namen ändert.</div></details>
@@ -1017,7 +1029,7 @@ function renderProfile() {
     sg.querySelectorAll('button').forEach((x) => x.classList.remove('on')); b.classList.add('on');
   })));
   $('#pfSave').onclick = () => {
-    Object.assign(S.profile, { name: $('#pf-name').value.trim(), nativeLang: $('#pf-native').value.trim() || 'English', city: $('#pf-city').value.trim(), level: $('#pf-level').value, goal: $('#pf-goal').value, interests: $('#pf-int').value.trim(), persona: $('#pf-persona').value.trim() || 'Akhiro', voice: $('#pf-voice').value, echoGuard: $('#pf-echo').checked });
+    Object.assign(S.profile, { name: $('#pf-name').value.trim(), nativeLang: $('#pf-native').value.trim() || 'English', city: $('#pf-city').value.trim(), level: $('#pf-level').value, goal: $('#pf-goal').value, interests: $('#pf-int').value.trim(), persona: $('#pf-persona').value.trim() || 'Akhiro', voice: $('#pf-voice').value, bargeIn: $('#pf-barge').checked, echoGuard: $('#pf-echo').checked });
     document.querySelectorAll('#view-profile [data-seg]').forEach((sg) => { const on = sg.querySelector('.on'); if (on) { const k = sg.dataset.seg; S.profile[k] = k === 'dailyGoalMin' ? Number(on.dataset.v) : on.dataset.v; } });
     persistProfile(); toast('Gespeichert ✓'); renderAll();
   };

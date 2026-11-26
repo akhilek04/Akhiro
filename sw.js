@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Network first, so a new upload shows up right away.
-const CACHE = 'akhiro-v1-5';
+const CACHE = 'akhiro-v1-6';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
